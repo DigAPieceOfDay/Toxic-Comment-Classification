@@ -1,0 +1,328 @@
+library(tidyverse)
+library(tidytext)
+library(magrittr)
+library(doParallel)
+library(text2vec)
+library(caret)
+library(xgboost)
+
+
+# set core numbers
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores,type="PSOCK")
+registerDoParallel(cl)
+
+cat("Load data...\n")
+
+train <- read_csv("./data/train.csv") 
+test <- read_csv("./data/test.csv") 
+submission <- read_csv("./data/sample_submission.csv") 
+
+tri <- 1:nrow(train)
+targets <- c(
+  "toxic",
+  "severe_toxic",
+  "obscene",
+  "threat",
+  "insult",
+  "identity_hate"
+)
+
+#------------------------------- DATA CLEAN ------------------------------------
+cat("Basic preprocessing & stats...\n")
+
+# data imbalance process
+prop.table(table(train$toxic))
+
+# train[,targets] <- lapply(train[,targets],as.factor)
+# train_balance <- SMOTE(
+#   toxic ~ .,
+#   train,
+#   perc.over = 600,
+#   perc.under = 100
+# )
+# 
+
+tr_te <- train %>% 
+  select(-one_of(targets)) %>%
+  bind_rows(test) %>%
+  mutate(
+    length = str_length(comment_text),
+    use_cap = str_count(comment_text, "[A-Z]"),
+    cap_len = use_cap / length,
+    use_lower = str_count(comment_text, "[a-z]"),
+    low_len = use_lower / length,
+    cap_rate = ifelse(is.null(use_cap / use_lower), 0, use_cap / use_lower),
+    cap_odds = ifelse(is.null(cap_len / low_len), 0, cap_len / low_len),
+    use_exl = str_count(comment_text, fixed("!")),
+    use_space = str_count(comment_text, fixed(" ")),
+    use_double_space = str_count(comment_text, fixed("  ")),
+    use_quest = str_count(comment_text, fixed("?")),
+    use_punt = str_count(comment_text, "[[:punct:]]"),
+    use_digit = str_count(comment_text, "[[:digit:]]"),
+    digit_len = use_digit / length,
+    use_break = str_count(comment_text, fixed("\n")),
+    use_word = str_count(comment_text, "\\w+"),
+    use_symbol = str_count(comment_text, "&|@|#|\\$|%|\\*|\\^"),
+    use_char = str_count(comment_text, "\\W*\\b\\w\\b\\W*"),
+    use_i = str_count(comment_text, "(\\bI\\b)|(\\bi\\b)"),
+    i_len = use_i / length,
+    char_len = use_char / length,
+    symbol_len = use_symbol / length,
+    use_emotj = str_count(comment_text, "((?::|;|=)(?:-)?(?:\\)|D|P))"),
+    cap_emo = use_emotj / length
+  ) %>% 
+  # select(-id) %T>% 
+  glimpse()
+
+
+# Remove all special chars, clean text and trasform words for comments
+all_comments.clean <- tr_te %$%
+  str_to_lower(comment_text) %>%
+  
+  # clear link
+  str_replace_all("(f|ht)tp(s?)://\\S+", " ") %>%
+  str_replace_all("http\\S+", "") %>%
+  str_replace_all("xml\\S+", "") %>%
+  
+  # multiple whitspace to one
+  str_replace_all("\\s{2}", " ") %>%
+  
+  # transform short forms
+  str_replace_all("what's", "what is ") %>%
+  str_replace_all("\\'s", " is ") %>%
+  str_replace_all("\\'ve", " have ") %>%
+  str_replace_all("can't", "cannot ") %>%
+  str_replace_all("n't", " not ") %>%
+  str_replace_all("i'm", "i am ") %>%
+  str_replace_all("\\'re", " are ") %>%
+  str_replace_all("\\'d", " would ") %>%
+  str_replace_all("\\'ll", " will ") %>%
+  str_replace_all("\\'scuse", " excuse ") %>%
+  str_replace_all("pleas", " please ") %>%
+  str_replace_all("sourc", " source ") %>%
+  str_replace_all("peopl", " people ") %>%
+  str_replace_all("remov", " remove ") %>%
+  
+  # multiple whitspace to one
+  str_replace_all("\\s{2}", " ") %>%
+  
+  # transform shittext
+  str_replace_all("(a|e)w+\\b", "") %>%
+  str_replace_all("(y)a+\\b", "") %>%
+  str_replace_all("(w)w+\\b", "") %>%
+  str_replace_all("((a+)|(h+))(a+)((h+)?)\\b", "") %>%
+  str_replace_all("((lol)(o?))+\\b", "") %>%
+  str_replace_all("n ig ger", " nigger ") %>%
+  str_replace_all("s hit", " shit ") %>%
+  str_replace_all("g ay", " gay ") %>%
+  str_replace_all("f ag got", " faggot ") %>%
+  str_replace_all("c ock", " cock ") %>%
+  str_replace_all("cu nt", " cunt ") %>%
+  str_replace_all("idi ot", " idiot ") %>%
+  str_replace_all("f u c k", " fuck ") %>%
+  str_replace_all("fu ck", " fuck ") %>%
+  str_replace_all("f u ck", " fuck ") %>%
+  str_replace_all("c u n t", " cunt ") %>%
+  str_replace_all("s u c k", " suck ") %>%
+  str_replace_all("c o c k", " cock ") %>%
+  str_replace_all("g a y", " gay ") %>%
+  str_replace_all("ga y", " gay ") %>%
+  str_replace_all("i d i o t", " idiot ") %>%
+  str_replace_all("cocksu cking", "cock sucking") %>%
+  str_replace_all("du mbfu ck", "dumbfuck") %>%
+  str_replace_all("cu nt", "cunt") %>%
+  str_replace_all("(?<=\\b(fu|su|di|co|li))\\s(?=(ck)\\b)", "") %>%
+  str_replace_all("(?<=\\w(ck))\\s(?=(ing)\\b)", "") %>%
+  str_replace_all("(?<=\\b\\w)\\s(?=\\w\\b)", "") %>%
+  str_replace_all("((lol)(o?))+", "") %>%
+  str_replace_all("(?<=\\b(fu|su|di|co|li))\\s(?=(ck)\\b)", "") %>%
+  str_replace_all("(?<=\\w(uc))\\s(?=(ing)\\b)", "") %>%
+  str_replace_all("(?<=\\b(fu|su|di|co|li))\\s(?=(ck)\\w)", "") %>%
+  str_replace_all("(?<=\\b(fu|su|di|co|li))\\s(?=(k)\\w)", "c") %>%
+  
+  # clean nicknames
+  str_replace_all("@\\w+", " ") %>%
+  
+  # clean digit
+  str_replace_all("[[:digit:]]", " ") %>%
+  
+  # remove linebreaks
+  str_replace_all("\n", " ") %>%
+  
+  # remove graphics
+  str_replace_all("[^[:graph:]]", " ") %>%
+  
+  # remove punctuation (if remain...)
+  str_replace_all("[[:punct:]]", " ") %>%
+  
+  
+  str_replace_all("[^[:alnum:]]", " ") %>%
+  
+  # remove single char
+  str_replace_all("\\W*\\b\\w\\b\\W*", " ")  %>%
+  
+  # remove words with len < 2
+  str_replace_all("\\b\\w{1,2}\\b", " ")  %>%
+  
+  # multiple whitspace to one
+  str_replace_all("\\s{2}", " ") %>%
+  str_replace_all("\\s+", " ") 
+
+#-----------------------------FEATURE ENGINEER------------------------------------
+cat("Parsing comments...\n")
+
+# 1.Vocabulary-based vectorization
+it <- all_comments.clean %>%
+  itoken_parallel(
+    tokenizer = word_tokenizer,
+    ids = tr_te$id,
+    n_chunks = 4
+  )
+
+# 2.create vocabulary by n-grams
+
+## Generate Stopwords 
+stops <- c(
+  tm::stopwords("english"),
+  tm::stopwords("SMART"),
+  stopwords.custom
+) %>%
+  gofastr::prep_stopwords()
+
+vocab <- create_vocabulary(
+  it,
+  ngram = c(1, 2),
+  stopwords = stops
+) %>%
+  prune_vocabulary(
+    term_count_min = 5,
+    doc_proportion_max = 0.5,
+    doc_proportion_min = 0.001,
+    vocab_term_max = 10000
+  )
+
+
+# 3.vectorizer vocabulary
+vectorizer <- vocab_vectorizer(vocab)
+
+# 4.create dtm by tfidf and nomalize for l2
+tfidf <- TfIdf$new(norm = "l2", sublinear_tf = T)
+dtm <- create_dtm(it, vectorizer) %>%
+  fit_transform(tfidf)
+
+# 5.create lda model
+n_topics = 40
+m_lda <- LDA$new(
+  n_topics = n_topics,
+  doc_topic_prior = 50 / n_topics,
+  topic_word_prior =  1 / n_topics
+)
+
+lda <- m_lda$fit_transform(
+  dtm,
+  n_iter = 500,
+  convergence_tol = 0.001,
+  check_convergence_every_n = 25
+)
+
+
+# create glove model
+# use window of 5 for context words
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+
+glove <- GlobalVectors$new(
+  word_vectors_size = 50,
+  vocabulary = vocab,
+  x_max = 10
+)
+word_vecs <- fit_transform(tcm, glove, n_iter = 100)
+doc_vecs <- dtm %*% word_vecs
+
+
+# 6.split data train and test
+cat("Preparing data for glmnet...\n")
+X <- tr_te %>% 
+  select(-c(comment_text,id)) %>% 
+  Matrix::sparse.model.matrix(~ . - 1, .) %>% 
+  cbind(dtm,lda,doc_vecs)
+
+X_train <- X[tri, ]
+X_test <- X[-tri, ]
+
+# -----------------------------Train Model------------------------------
+options(scipen = 50)
+
+inds <- createDataPartition(train$toxic,p = 0.8,list = F)
+x0 <- X_train[inds[,1],]
+x1 <- X_train[-inds[,1],]
+
+params <- list(
+  booster = "gbtree",
+  objective = "binary:logistic",
+  eta = 0.05,
+  max_depth = 10,
+  subsample = 0.886,
+  min_child_weight = 10,
+  colsample_bytree = 0.886,
+  silent = 1,
+  nthread = 4,
+  seed = 20180305
+)
+
+# solution <- data.frame(id=test$id)
+
+# cv model to test best iteration    
+for (target in targets) {
+  cat("\nFitting", target, "...\n")
+  y <- train[[target]]
+  bst.cv <- xgb.cv(
+    x0,
+    y[inds],
+    params = params,
+    nfold = 4,
+    nrounds = 1000,
+    metrics = "auc",
+    early_stopping_rounds = 20
+  )
+  
+  # best nrounds
+  best_iteration <- bst.cv$best_iteration
+  
+  # bst <- xgboost(
+  #   x0,
+  #   y[inds],
+  #   params = params,
+  #   metrics = "auc",
+  #   nrounds = best_iteration
+  # )
+  # 
+  # solution[[target]] <- predict(bst, x1)
+  
+}
+
+
+# train all data
+for (target in targets) {
+  cat("\nFitting", target, "...\n")
+  y <- train[[target]]
+  m_xgb <- xgboost(
+    X_train, 
+    y, 
+    params = params,
+    nrounds = 1000,
+    metrics = "auc"
+  )
+  submission[[target]] <- predict(m_xgb, X_test)
+}
+
+
+cat("Creating submission file...\n")
+write_csv(
+  submission, 
+  paste0("./submission/sample_submission_",Sys.Date(),".csv")
+)
+
+save.image(
+  paste0("./output/toxic_classify_", Sys.Date(), ".RData")
+)
