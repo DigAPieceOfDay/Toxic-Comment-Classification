@@ -386,9 +386,10 @@ tcm_train <- create_tcm(it_train, vectorizer, skip_grams_window = 5L)
 tcm_test <- create_tcm(it_test, vectorizer, skip_grams_window = 5L)
 
 glove <- GlobalVectors$new(
-  word_vectors_size = 50,
+  word_vectors_size = 300,
   vocabulary = vocab,
-  x_max = 10
+  x_max = 10,
+  learning_rate = 0.05
 )
 
 # create word_vectors for train
@@ -435,12 +436,23 @@ cluster1 <- kmeans(dataset[, c(1:26)], centers = 7, iter.max = 15)
 
 set.seed(17)
 cluster2 <-
-  kmeans(dataset[, c((26 + nlsa):ncol(dataset))], centers = 9, iter.max = 15)
+  kmeans(dataset[, c((27 + nlsa):ncol(dataset))], centers = 9, iter.max = 15)
 
-set.seed(17)
-cluster3 <- kmeans(dataset, centers = 17, iter.max = 15)
+# set.seed(17)
+# cluster3 <- kmeans(dataset, centers = 17, iter.max = 15)
 
+Train_X <-
+  cbind(
+    Train_X,
+    cluster1 = as.integer(cluster1$cluster[1:nrow(Train_X)]),
+    cluster2 = as.integer(cluster2$cluster[1:nrow(Train_X)])
+)
 
+Test_X <- cbind(
+  lgb_testing,
+  cluster1 = as.integer(cluster1$cluster[(nrow(Train_X) + 1):(nrow(Train_X) + nrow(Train_X))]),
+  cluster2 = as.integer(cluster2$cluster[(nrow(Train_X) + 1):(nrow(Train_X) + nrow(Train_X))])
+)
 
 
 #----------------------------GLMNET TRAIN MODEL----------------------------------

@@ -444,14 +444,15 @@ params <- list(
   seed = 20180305
 )
 
-# solution <- data.frame(id=test$id)
+# create cv predict result
+solution <- data.frame(id = test$id)
 
 # cv model to test best iteration    
 for (target in targets) {
   cat("\nFitting", target, "...\n")
   y <- train[[target]]
   bst.cv <- xgb.cv(
-    x0,
+    as.matrix(x0),
     y[inds],
     params = params,
     nfold = 4,
@@ -481,13 +482,13 @@ for (target in targets) {
   cat("\nFitting", target, "...\n")
   y <- train[[target]]
   m_xgb <- xgboost(
-    X_train, 
+    as.matrix(Train_X), 
     y, 
     params = params,
     nrounds = 1000,
     metrics = "auc"
   )
-  submission[[target]] <- predict(m_xgb, X_test)
+  submission[[target]] <- predict(m_xgb, as.matrix(Test_X))
 }
 
 
